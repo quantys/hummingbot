@@ -36,7 +36,7 @@ class OrderBookEvent(Enum):
     TradeEvent = 901
 
 
-<<<<<<< HEAD
+#<<<<<<< HEAD
 =======
 class ZeroExEvent(Enum):
     Fill = 1001
@@ -46,7 +46,7 @@ class RemoteEvent(Enum):
     RemoteCmdEvent = 2001
 
 
->>>>>>> ea8d4fd... Add Remote Commands Executor module
+#>>>>>>> ea8d4fd... Add Remote Commands Executor module
 class TradeType(Enum):
     BUY = 1
     SELL = 2
