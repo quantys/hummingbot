@@ -37,7 +37,7 @@ class OrderBookEvent(Enum):
 
 
 #<<<<<<< HEAD
-=======
+#=======
 class ZeroExEvent(Enum):
     Fill = 1001
 
