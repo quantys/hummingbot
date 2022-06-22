@@ -594,8 +594,8 @@ cdef class PerpetualMarketMakingStrategy(StrategyBase):
                     self._close_order_type = OrderType.LIMIT
                     self.c_execute_orders_proposal(proposal, PositionAction.OPEN)
                 # Reset peak ask and bid prices
-                self._ts_peak_ask_price = market.get_price(self.trading_pair, False)
-                self._ts_peak_bid_price = market.get_price(self.trading_pair, True)
+                self._ts_peak_ask_price = market.get_price(self.trading_pair, True)
+                self._ts_peak_bid_price = market.get_price(self.trading_pair, False)
             else:
                 self.c_manage_positions(session_positions)
         finally:
@@ -705,19 +705,40 @@ cdef class PerpetualMarketMakingStrategy(StrategyBase):
             if position.amount == Decimal("0"):
                 continue
             if position.amount > 0:  # this is a long position
-                top_ask = market.get_price(self.trading_pair, False)
+                top_ask = market.get_price(self.trading_pair, True)
                 if max(top_ask, self._ts_peak_ask_price) >= (position.entry_price * (Decimal("1") + self._ts_activation_spread)):
                     if top_ask > self._ts_peak_ask_price or self._ts_peak_ask_price == Decimal("0"):
                         estimated_exit = (top_ask * (Decimal("1") - self._ts_callback_rate))
-                        estimated_exit = "Nill" if estimated_exit <= position.entry_price else estimated_exit
-                        self.logger().info(f"New {top_ask} {self.quote_asset} peak price on sell order book, estimated exit price"
+                        estimated_exit = "Nill" if estimated_exit <= (position.entry_price * (Decimal("1") + self._ts_activation_spread)) else estimated_exit
+                        self.logger().info(f"v0.18 VARILONG: New {top_ask} {self.quote_asset} peak price on sell order book, estimated exit price"
                                            f" to lock profit is {estimated_exit} {self.quote_asset}.")
                         self._ts_peak_ask_price = top_ask
-                    elif top_ask <= (self._ts_peak_ask_price * (Decimal("1") - self._ts_callback_rate)):
-                        exit_price = market.get_price_for_volume(self.trading_pair, False,
+                    elif top_ask <= (self._ts_peak_ask_price * (Decimal("1") - self._ts_callback_rate)) and top_ask > (position.entry_price * (Decimal("1") + self._ts_activation_spread)):
+                        exit_price = market.get_price_for_volume(self.trading_pair, True,
                                                                  abs(position.amount)).result_price
                         price = market.c_quantize_order_price(self.trading_pair, exit_price)
-
+                        size = market.c_quantize_order_amount(self.trading_pair, position.amount)
+                        old_exit_orders = [
+                            o for o in active_orders
+                            if (
+                                (o.price != price or o.quantity != abs(size))
+                                and o.client_order_id in self._exit_orders
+                                and ((position.amount < 0 and o.is_buy) or (position.amount > 0 and not o.is_buy))
+                            )
+                        ]
+                        for old_order in old_exit_orders:
+                            self.c_cancel_order(self._market_info, old_order.client_order_id)
+                            self.logger().info(f"Initiated cancellation of previous take profit order {old_order.client_order_id} in favour of new take profit order.")                            
+                        exit_order_exists = [o for o in active_orders if o.price == price]
+                        if len(exit_order_exists) == 0:
+                            size = market.c_quantize_order_amount(self.trading_pair, abs(position.amount))
+                            if size > 0 and price > 0:
+                                if position.amount < 0:
+                                    buys.append(PriceSize(price, size))
+                                else:
+                                    sells.append(PriceSize(price, size))    
+                            
+                            """ commented out to change for better check language
                         # Do some checks to prevent duplicating orders to close positions
                         exit_order_exists = [o for o in active_orders if o.client_order_id in self._exit_orders]
                         create_order = True
@@ -727,20 +748,43 @@ cdef class PerpetualMarketMakingStrategy(StrategyBase):
                                 create_order = False
                         if create_order is True and price > position.entry_price:
                             sells.append(PriceSize(price, abs(position.amount)))
-            else:
-                top_bid = market.get_price(self.trading_pair, True)
+                            """
+                            
+            elif position.amount < 0: #short position #C: changed from elif to if to run independent of first if for long position
+                top_bid = market.get_price(self.trading_pair, False)
                 if min(top_bid, self._ts_peak_bid_price) <= (position.entry_price * (Decimal("1") - self._ts_activation_spread)):
                     if top_bid < self._ts_peak_bid_price or self._ts_peak_bid_price == Decimal("0"):
                         estimated_exit = (top_bid * (Decimal("1") + self._ts_callback_rate))
-                        estimated_exit = "Nill" if estimated_exit >= position.entry_price else estimated_exit
-                        self.logger().info(f"New {top_bid} {self.quote_asset} peak price on buy order book, estimated exit price"
+                        estimated_exit = "Nill" if estimated_exit >= (position.entry_price * (Decimal("1") - self._ts_activation_spread)) else estimated_exit
+                        self.logger().info(f"v0.18 VARISHORT: New {top_bid} {self.quote_asset} lowest price on buy order book, estimated exit price"
                                            f" to lock profit is {estimated_exit} {self.quote_asset}.")
                         self._ts_peak_bid_price = top_bid
-                    elif top_bid >= (self._ts_peak_bid_price * (Decimal("1") + self._ts_callback_rate)):
-                        exit_price = market.get_price_for_volume(self.trading_pair, True,
+                    elif top_bid >= (self._ts_peak_bid_price * (Decimal("1") + self._ts_callback_rate)) and top_bid < (position.entry_price * (Decimal("1") - self._ts_activation_spread)):
+                        exit_price = market.get_price_for_volume(self.trading_pair, False,
                                                                  abs(position.amount)).result_price
                         price = market.c_quantize_order_price(self.trading_pair, exit_price)
-
+                        size = market.c_quantize_order_amount(self.trading_pair, position.amount)
+                        old_exit_orders = [
+                            o for o in active_orders
+                            if (
+                                (o.price != price or o.quantity != abs(size))
+                                and o.client_order_id in self._exit_orders
+                                and ((position.amount < 0 and o.is_buy) or (position.amount > 0 and not o.is_buy))
+                            )
+                        ]
+                        for old_order in old_exit_orders:
+                            self.c_cancel_order(self._market_info, old_order.client_order_id)
+                            self.logger().info(f"Initiated cancellation of previous take profit order {old_order.client_order_id} in favour of new take profit order.")
+                        exit_order_exists = [o for o in active_orders if o.price == price]
+                        if len(exit_order_exists) == 0:
+                            size = market.c_quantize_order_amount(self.trading_pair, abs(position.amount))
+                            if size > 0 and price > 0:
+                                if position.amount < 0:
+                                    buys.append(PriceSize(price, size))
+                                else:
+                                    sells.append(PriceSize(price, size))
+                                    
+                            """ commented out to change for better check language
                         # Do some checks to prevent duplicating orders to close positions
                         exit_order_exists = [o for o in active_orders if o.client_order_id in self._exit_orders]
                         create_order = True
@@ -750,7 +794,8 @@ cdef class PerpetualMarketMakingStrategy(StrategyBase):
                                 create_order = False
                         if create_order is True and price < position.entry_price:
                             buys.append(PriceSize(price, abs(position.amount)))
-            return Proposal(buys, sells)
+                            """
+        return Proposal(buys, sells)
 
     cdef c_stop_loss_feature(self, object mode, list active_positions):
         cdef:
@@ -778,7 +823,7 @@ cdef class PerpetualMarketMakingStrategy(StrategyBase):
                     if size > 0 and price > 0:
                         self.logger().info(f"Creating stop loss sell order to close long position.")
                         sells.append(PriceSize(price, size))
-            elif (top_bid >= stop_loss_price and position.amount < 0):
+            if (top_bid >= stop_loss_price and position.amount < 0): #C: changed from elif to if to run independent of first if for long position
                 price = market.c_quantize_order_price(self.trading_pair, stop_loss_price)
                 take_profit_orders = [o for o in active_orders if (o.is_buy and o.price < price and o.client_order_id in self._exit_orders)]
                 # cancel take profit orders if they exist
@@ -804,15 +849,18 @@ cdef class PerpetualMarketMakingStrategy(StrategyBase):
         if order_override is not None and len(order_override) > 0:
             for key, value in order_override.items():
                 if str(value[0]) in ["buy", "sell"]:
-                    if str(value[0]) == "buy":
-                        price = self.get_price() * (Decimal("1") - Decimal(str(value[1])) / Decimal("100"))
+                    if str(value[0]) == "buy": 
+                        #C: edit to respond to bid spread in bot when there is an override:
+                        price = self.get_price() * (Decimal("1") - self._bid_spread - (Decimal(str(value[1]))) / Decimal("100"))
                         price = market.c_quantize_order_price(self.trading_pair, price)
                         size = Decimal(str(value[2]))
                         size = market.c_quantize_order_amount(self.trading_pair, size)
                         if size > 0 and price > 0:
                             buys.append(PriceSize(price, size))
-                    elif str(value[0]) == "sell":
-                        price = self.get_price() * (Decimal("1") + Decimal(str(value[1])) / Decimal("100"))
+                            
+                    elif str(value[0]) == "sell": 
+                        #C: edit to respond to ask spread in bot when there is an override:
+                        price = self.get_price() * (Decimal("1") + self._ask_spread + (Decimal(str(value[1]))) / Decimal("100"))
                         price = market.c_quantize_order_price(self.trading_pair, price)
                         size = Decimal(str(value[2]))
                         size = market.c_quantize_order_amount(self.trading_pair, size)
@@ -833,9 +881,9 @@ cdef class PerpetualMarketMakingStrategy(StrategyBase):
                 size = market.c_quantize_order_amount(self.trading_pair, size)
                 if size > 0:
                     sells.append(PriceSize(price, size))
-
+      
         return Proposal(buys, sells)
-
+        
     cdef tuple c_get_adjusted_available_balance(self, list orders):
         """
         Calculates the available balance, plus the amount attributed to orders.
@@ -1217,7 +1265,7 @@ cdef class PerpetualMarketMakingStrategy(StrategyBase):
                 if position_action == PositionAction.CLOSE:
                     self._exit_orders.append(bid_order_id)
                 orders_created = True
-        if len(proposal.sells) > 0:
+        if len(proposal.sells) > 0: 
             if position_action == PositionAction.CLOSE:
                 if self._current_timestamp < self._next_sell_exit_order_timestamp:
                     return
@@ -1228,7 +1276,7 @@ cdef class PerpetualMarketMakingStrategy(StrategyBase):
                                    f"{sell.price.normalize()} {self.quote_asset}"
                                    for sell in proposal.sells]
                 self.logger().info(
-                    f"({self.trading_pair}) Creating {len(proposal.sells)}  {self._close_order_type.name} ask "
+                    f"({self.trading_pair}) Creating {len(proposal.sells)} {self._close_order_type.name} ask "
                     f"orders at (Size, Price): {price_quote_str} to {position_action.name} position."
                 )
             for sell in proposal.sells:
